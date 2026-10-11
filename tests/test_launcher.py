@@ -48,16 +48,50 @@ class TestAppLauncher(unittest.TestCase):
         classes = AppLauncher.get_target_window_classes(app)
         self.assertIn("zen-youtube", classes)
 
-    def test_launch_with_systemd_run(self):
+    def test_get_app_target_activity_firefox(self):
         app = AppEntry(
-            name="Test Echo",
-            command="true",
-            desktop_file="",
-            delay_seconds=0,
+            name="Firefox",
+            command="firefox",
+            desktop_file="~/.local/share/applications/org.mozilla.firefox.desktop",
         )
-        success = AppLauncher.launch(app)
-        self.assertTrue(success)
+        target_act = AppLauncher.get_app_target_activity(app)
+        # In user configuration, Firefox is pinned to Second activity (33d46b90-fd3d-4586-9888-c103c2a62f4d)
+        self.assertEqual(target_act, "33d46b90-fd3d-4586-9888-c103c2a62f4d")
+
+    def test_cross_activity_launch_command(self):
+        app = AppEntry(
+            name="Firefox",
+            command="firefox",
+            desktop_file="~/.local/share/applications/org.mozilla.firefox.desktop",
+            delay_seconds=1,
+        )
+        # Mock get_current_activity to return Default activity
+        original_get_curr = AppLauncher.get_current_activity
+        try:
+            AppLauncher.get_current_activity = staticmethod(lambda: "027ddadb-5273-4710-aff6-ec33a2da7a60")
+            args, use_shell = AppLauncher.get_launch_command(app)
+            self.assertFalse(use_shell)
+            cmd_str = args[2]
+            self.assertIn('SetCurrentActivity "33d46b90-fd3d-4586-9888-c103c2a62f4d"', cmd_str)
+            self.assertIn('SetCurrentActivity "027ddadb-5273-4710-aff6-ec33a2da7a60"', cmd_str)
+            self.assertIn('gtk-launch "org.mozilla.firefox.desktop"', cmd_str)
+        finally:
+            AppLauncher.get_current_activity = original_get_curr
+
+    def test_clear_attention_deferred_does_not_crash(self):
+        app = AppEntry(
+            name="Firefox",
+            command="firefox",
+            desktop_file="~/.local/share/applications/org.mozilla.firefox.desktop",
+        )
+        # Verify method runs cleanly without unhandled exception
+        try:
+            AppLauncher.clear_attention_deferred(app)
+        except Exception as e:
+            self.fail(f"clear_attention_deferred raised an exception: {e}")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+

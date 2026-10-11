@@ -42,6 +42,10 @@ class AppLauncher:
 
         cmd_str = ""
 
+        # Check if the app is assigned to a specific KDE Plasma activity via kwinrules
+        target_activity = cls.get_app_target_activity(app)
+        current_activity = cls.get_current_activity()
+
         if desktop_id and has_gtk_launch:
             cmd_str = f'gtk-launch "{desktop_id}"'
         elif desktop_path.is_file() and has_gio:
@@ -58,10 +62,26 @@ class AppLauncher:
         if not cmd_str:
             raise ValueError(f"No valid command or desktop file found for app: {app.name}")
 
-        if app.delay_seconds > 0:
-            full_shell_cmd = f"sleep {app.delay_seconds} && exec {cmd_str}"
+        # If launching into a different KDE activity, switch to that activity momentarily
+        # so the startup notification token and taskbar entry are bound to the target activity
+        # instead of creating a phantom taskbar entry on the primary activity panel.
+        if target_activity and current_activity and target_activity != current_activity:
+            qdbus_bin = "qdbus-qt6" if cls._has_binary("qdbus-qt6") else "qdbus"
+            switch_and_launch = (
+                f'{qdbus_bin} org.kde.ActivityManager /ActivityManager/Activities SetCurrentActivity "{target_activity}" 2>/dev/null; '
+                f'{cmd_str}; '
+                f'sleep 0.2; '
+                f'{qdbus_bin} org.kde.ActivityManager /ActivityManager/Activities SetCurrentActivity "{current_activity}" 2>/dev/null'
+            )
+            cmd_str = switch_and_launch
+            exec_prefix = ""
         else:
-            full_shell_cmd = f"exec {cmd_str}"
+            exec_prefix = "exec "
+
+        if app.delay_seconds > 0:
+            full_shell_cmd = f"sleep {app.delay_seconds} && {exec_prefix}{cmd_str}"
+        else:
+            full_shell_cmd = f"{exec_prefix}{cmd_str}"
 
         return ["/bin/sh", "-c", full_shell_cmd], False
 
@@ -145,10 +165,53 @@ class AppLauncher:
             pass
 
     @classmethod
+    def clear_attention_deferred(cls, app: AppEntry, delay_seconds: float = 0.0) -> None:
+        """Polls for the app window's appearance and strips DEMANDS_ATTENTION via kdotool."""
+        if not cls._has_binary("kdotool"):
+            return
+
+        classes = cls.get_target_window_classes(app)
+        if not classes:
+            return
+
+        class_regex = "|".join(re.escape(c) for c in classes)
+        total_delay = max(0.0, float(app.delay_seconds)) + delay_seconds
+
+        # Background script: sleeps until startup delay passes, then polls kdotool to strip DEMANDS_ATTENTION
+        script = (
+            f"sleep {total_delay}; "
+            f"for i in $(seq 1 40); do "
+            f"wids=$(kdotool search --class '{class_regex}' 2>/dev/null); "
+            f'if [ -n "$wids" ]; then '
+            f'for wid in $wids; do '
+            f'kdotool windowstate --remove DEMANDS_ATTENTION "$wid" 2>/dev/null; '
+            f'done; '
+            f"fi; "
+            f"sleep 0.25; "
+            f"done"
+        )
+
+        try:
+            subprocess.Popen(
+                ["/bin/sh", "-c", script],
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        except Exception:
+            pass
+
+    @classmethod
     def launch(cls, app: AppEntry, global_launch_minimized: bool = False) -> bool:
         """Launches a single app in an isolated background session."""
         try:
             args, use_shell = cls.get_launch_command(app)
+
+            target_act = cls.get_app_target_activity(app)
+            curr_act = cls.get_current_activity()
+            is_cross_activity = bool(target_act and curr_act and target_act != curr_act)
 
             # In systemd user sessions (such as autostart), wrap with systemd-run so
             # the launched process breaks out into its own transient unit in app.slice
@@ -178,6 +241,8 @@ class AppLauncher:
                     if res.returncode == 0:
                         if app.start_minimized or global_launch_minimized:
                             cls.minimize_window_deferred(app)
+                        if is_cross_activity:
+                            cls.clear_attention_deferred(app)
                         return True
                 except Exception:
                     pass
@@ -196,17 +261,81 @@ class AppLauncher:
             # Check if application should be minimized upon launch
             if app.start_minimized or global_launch_minimized:
                 cls.minimize_window_deferred(app)
+            if is_cross_activity:
+                cls.clear_attention_deferred(app)
 
             return True
         except Exception:
             return False
 
+    @classmethod
+    def get_app_target_activity(cls, app: AppEntry) -> str:
+        """Determines if the app is assigned to a specific KDE activity in kwinrulesrc."""
+        kwinrules = Path.home() / ".config" / "kwinrulesrc"
+        if not kwinrules.is_file():
+            return ""
+
+        import configparser
+
+        try:
+            cfg = configparser.ConfigParser()
+            cfg.read(kwinrules)
+        except Exception:
+            return ""
+
+        candidates = []
+        desktop_target = app.desktop_file.strip()
+        if desktop_target:
+            p = Path(desktop_target).expanduser()
+            candidates.append(p.name.lower())
+            candidates.append(p.stem.lower())
+            if p.stem.lower().endswith(".desktop"):
+                candidates.append(p.stem[:-8].lower())
+
+        if app.command.strip():
+            parts = app.command.strip().split()
+            if parts:
+                candidates.append(Path(parts[0]).name.lower())
+
+        if app.id.strip():
+            cid = app.id.strip().lower()
+            candidates.append(cid)
+            if cid.endswith(".desktop"):
+                candidates.append(cid[:-8])
+
+        # Also add classes from get_target_window_classes
+        for c in cls.get_target_window_classes(app):
+            candidates.append(c.lower())
+
+        candidates = list(dict.fromkeys(c for c in candidates if c))
+
+        for section in cfg.sections():
+            act = cfg.get(section, "activity", fallback="").strip()
+            # If not pinned to a specific activity UUID or if pinned to all activities (all zeroes)
+            if not act or act == "00000000-0000-0000-0000-000000000000":
+                continue
+
+            wmclass = cfg.get(section, "wmclass", fallback="").strip().lower()
+            desktopfile = cfg.get(section, "desktopfile", fallback="").strip().lower()
+            desc = cfg.get(section, "description", fallback="").strip().lower()
+
+            wmclass_parts = wmclass.split() if wmclass else []
+
+            for cand in candidates:
+                if (wmclass and (cand == wmclass or cand in wmclass_parts)) or \
+                   (desktopfile and (cand == desktopfile or cand == f"{desktopfile}.desktop")) or \
+                   (desc and cand == desc):
+                    return act
+
+        return ""
+
     @staticmethod
     def get_current_activity() -> str:
         """Returns the current active KDE Plasma activity UUID if available."""
+        qdbus_bin = "qdbus-qt6" if shutil.which("qdbus-qt6") else "qdbus"
         try:
             res = subprocess.run(
-                ["qdbus-qt6", "org.kde.ActivityManager", "/ActivityManager/Activities", "CurrentActivity"],
+                [qdbus_bin, "org.kde.ActivityManager", "/ActivityManager/Activities", "CurrentActivity"],
                 capture_output=True,
                 text=True,
                 timeout=2,
