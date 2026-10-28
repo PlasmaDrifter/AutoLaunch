@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from config import AppEntry
 
@@ -135,8 +135,9 @@ class AppLauncher:
         if not classes:
             return
 
-        # Build regex for class search
-        class_regex = "|".join(re.escape(c) for c in classes)
+        # Build regex for class search with exact boundaries to prevent partial matches
+        inner_regex = "|".join(re.escape(c) for c in classes)
+        class_regex = f"^({inner_regex})$"
         total_delay = max(0.0, float(app.delay_seconds)) + delay_seconds
 
         # Background script: sleeps until startup delay passes, then polls kdotool search for window and minimizes
@@ -174,7 +175,9 @@ class AppLauncher:
         if not classes:
             return
 
-        class_regex = "|".join(re.escape(c) for c in classes)
+        # Build regex for class search with exact boundaries
+        inner_regex = "|".join(re.escape(c) for c in classes)
+        class_regex = f"^({inner_regex})$"
         total_delay = max(0.0, float(app.delay_seconds)) + delay_seconds
 
         # Background script: sleeps until startup delay passes, then polls kdotool to strip DEMANDS_ATTENTION
@@ -204,6 +207,63 @@ class AppLauncher:
             pass
 
     @classmethod
+    def enforce_geometry_deferred(
+        cls,
+        app: AppEntry,
+        target_pos: Optional[Tuple[int, int]] = None,
+        target_size: Optional[Tuple[int, int]] = None,
+        delay_seconds: float = 0.0,
+    ) -> None:
+        """Ensures a window whose startup geometry snapped or maximized incorrectly during boot settling is adjusted."""
+        if not cls._has_binary("kdotool"):
+            return
+
+        classes = cls.get_target_window_classes(app)
+        if not classes or (not target_pos and not target_size):
+            return
+
+        inner_regex = "|".join(re.escape(c) for c in classes)
+        class_regex = f"^({inner_regex})$"
+        total_delay = max(0.0, float(app.delay_seconds)) + delay_seconds
+
+        pos_cmd = f'kdotool windowmove "$wid" {target_pos[0]} {target_pos[1]} 2>/dev/null; ' if target_pos else ""
+        size_cmd = f'kdotool windowsize "$wid" {target_size[0]} {target_size[1]} 2>/dev/null; ' if target_size else ""
+
+        # Check window appearance; if snapped to top (Y=0) or unexpected size, remove MAXIMIZED_VERT and re-apply geometry
+        script = (
+            f"sleep {total_delay}; "
+            f"for i in $(seq 1 40); do "
+            f"wids=$(kdotool search --class '{class_regex}' 2>/dev/null); "
+            f'if [ -n "$wids" ]; then '
+            f'for wid in $wids; do '
+            f'geom=$(kdotool getwindowgeometry "$wid" 2>/dev/null); '
+            f'y_pos=$(echo "$geom" | grep "Position:" | sed -E "s/.*Position:[[:space:]]*[0-9.]+,([0-9.]+).*/\\1/" | cut -d. -f1); '
+            f'height=$(echo "$geom" | grep "Geometry:" | sed -E "s/.*Geometry:[[:space:]]*[0-9]+x([0-9]+).*/\\1/"); '
+            f'if [ "$y_pos" = "0" ] || ([ -n "{target_size[1] if target_size else ""}" ] && [ "$height" != "{target_size[1] if target_size else ""}" ]); then '
+            f'kdotool windowstate --remove MAXIMIZED_VERT "$wid" 2>/dev/null; '
+            f'{pos_cmd}'
+            f'{size_cmd}'
+            f'fi; '
+            f'done; '
+            f"break; "
+            f"fi; "
+            f"sleep 0.25; "
+            f"done"
+        )
+
+        try:
+            subprocess.Popen(
+                ["/bin/sh", "-c", script],
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+        except Exception:
+            pass
+
+    @classmethod
     def launch(cls, app: AppEntry, global_launch_minimized: bool = False) -> bool:
         """Launches a single app in an isolated background session."""
         try:
@@ -212,6 +272,7 @@ class AppLauncher:
             target_act = cls.get_app_target_activity(app)
             curr_act = cls.get_current_activity()
             is_cross_activity = bool(target_act and curr_act and target_act != curr_act)
+            geom = cls.get_app_target_geometry(app)
 
             # In systemd user sessions (such as autostart), wrap with systemd-run so
             # the launched process breaks out into its own transient unit in app.slice
@@ -243,6 +304,8 @@ class AppLauncher:
                             cls.minimize_window_deferred(app)
                         if is_cross_activity:
                             cls.clear_attention_deferred(app)
+                        if geom and (geom.get("position") or geom.get("size")) and not (app.start_minimized or global_launch_minimized):
+                            cls.enforce_geometry_deferred(app, geom.get("position"), geom.get("size"), delay_seconds=1.5)
                         return True
                 except Exception:
                     pass
@@ -263,6 +326,8 @@ class AppLauncher:
                 cls.minimize_window_deferred(app)
             if is_cross_activity:
                 cls.clear_attention_deferred(app)
+            if geom and (geom.get("position") or geom.get("size")) and not (app.start_minimized or global_launch_minimized):
+                cls.enforce_geometry_deferred(app, geom.get("position"), geom.get("size"), delay_seconds=1.5)
 
             return True
         except Exception:
@@ -328,6 +393,72 @@ class AppLauncher:
                     return act
 
         return ""
+
+    @classmethod
+    def get_app_target_geometry(cls, app: AppEntry) -> Optional[Dict[str, Optional[Tuple[int, int]]]]:
+        """Extracts configured target position and size for the app from kwinrulesrc if specified."""
+        kwinrules = Path.home() / ".config" / "kwinrulesrc"
+        if not kwinrules.is_file():
+            return None
+
+        import configparser
+
+        try:
+            cfg = configparser.ConfigParser()
+            cfg.read(kwinrules)
+        except Exception:
+            return None
+
+        candidates = []
+        desktop_target = app.desktop_file.strip()
+        if desktop_target:
+            p = Path(desktop_target).expanduser()
+            candidates.append(p.name.lower())
+            candidates.append(p.stem.lower())
+            if p.stem.lower().endswith(".desktop"):
+                candidates.append(p.stem[:-8].lower())
+
+        if app.command.strip():
+            parts = app.command.strip().split()
+            if parts:
+                candidates.append(Path(parts[0]).name.lower())
+
+        if app.id.strip():
+            cid = app.id.strip().lower()
+            candidates.append(cid)
+            if cid.endswith(".desktop"):
+                candidates.append(cid[:-8])
+
+        # Also add classes from get_target_window_classes
+        for c in cls.get_target_window_classes(app):
+            candidates.append(c.lower())
+
+        candidates = list(dict.fromkeys(c for c in candidates if c))
+
+        for section in cfg.sections():
+            pos = cfg.get(section, "position", fallback="").strip()
+            size = cfg.get(section, "size", fallback="").strip()
+            if not pos and not size:
+                continue
+
+            wmclass = cfg.get(section, "wmclass", fallback="").strip().lower()
+            desktopfile = cfg.get(section, "desktopfile", fallback="").strip().lower()
+            desc = cfg.get(section, "description", fallback="").strip().lower()
+
+            wmclass_parts = wmclass.split() if wmclass else []
+
+            for cand in candidates:
+                if (wmclass and (cand == wmclass or cand in wmclass_parts)) or \
+                   (desktopfile and (cand == desktopfile or cand == f"{desktopfile}.desktop")) or \
+                   (desc and cand == desc):
+                    pos_vals = [int(v.strip()) for v in pos.split(",") if v.strip().lstrip("-").isdigit()] if pos else []
+                    size_vals = [int(v.strip()) for v in size.split(",") if v.strip().isdigit()] if size else []
+                    return {
+                        "position": (pos_vals[0], pos_vals[1]) if len(pos_vals) == 2 else None,
+                        "size": (size_vals[0], size_vals[1]) if len(size_vals) == 2 else None,
+                    }
+
+        return None
 
     @staticmethod
     def get_current_activity() -> str:

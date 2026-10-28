@@ -90,6 +90,28 @@ class TestAppLauncher(unittest.TestCase):
         except Exception as e:
             self.fail(f"clear_attention_deferred raised an exception: {e}")
 
+    def test_get_app_target_geometry_zen(self):
+        app = AppEntry(
+            name="Zen Browser",
+            command="~/.tarball-installations/zen/zen",
+            desktop_file="~/.local/share/applications/zen-browser.desktop",
+        )
+        geom = AppLauncher.get_app_target_geometry(app)
+        self.assertIsNotNone(geom)
+        self.assertEqual(geom.get("position"), (2305, 14))
+        self.assertEqual(geom.get("size"), (1787, 1359))
+
+    def test_enforce_geometry_deferred_does_not_crash(self):
+        app = AppEntry(
+            name="Zen Browser",
+            command="~/.tarball-installations/zen/zen",
+            desktop_file="~/.local/share/applications/zen-browser.desktop",
+        )
+        try:
+            AppLauncher.enforce_geometry_deferred(app, (2305, 14), (1787, 1359))
+        except Exception as e:
+            self.fail(f"enforce_geometry_deferred raised an exception: {e}")
+
 
 if __name__ == "__main__":
     unittest.main()
