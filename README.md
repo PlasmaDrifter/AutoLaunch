@@ -55,6 +55,20 @@ The installer configures:
 
 ---
 
+## Updating
+
+To update an existing installation to the latest version:
+
+```bash
+cd ~/Source/AutoLaunch
+git pull
+./install.sh
+```
+
+Running `./install.sh` updates the local wrapper scripts, desktop entries, and application assets.
+
+---
+
 ## Usage
 
 ### Interactive GUI Mode
