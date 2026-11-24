@@ -1,13 +1,13 @@
 """Frameless window support and custom window headers for AutoLaunch.
 
 Provides Wayland-native window dragging via QWindow.startSystemMove(),
-custom window control buttons (minimize, close), and drop-shadow acrylic frames.
+custom window control buttons (minimize, close), and interactive frameless resizing.
 Complies with zero-emoji guidelines and dynamic path resolution.
 """
 
 from typing import Optional
 
-from PyQt6.QtCore import QPoint, QRect, Qt, QTimer, QEvent, QObject
+from PyQt6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPaintEvent, QPen
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 
 
 class WindowButton(QPushButton):
-    """Refined window action button with vector-drawn glyphs and animated hover effects."""
+    """Refined window action button with vector-drawn glyphs and hover effects."""
 
     def __init__(self, kind: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -25,29 +25,29 @@ class WindowButton(QPushButton):
         self._hovered = False
         self._pressed = False
 
-    def enterEvent(self, event) -> None:
+    def enterEvent(self, event: Optional[QEvent]) -> None:  # type: ignore[override]
         self._hovered = True
         self.update()
-        super().enterEvent(event)
+        super().enterEvent(event)  # type: ignore[arg-type]
 
-    def leaveEvent(self, event) -> None:
+    def leaveEvent(self, event: Optional[QEvent]) -> None:
         self._hovered = False
         self._pressed = False
         self.update()
         super().leaveEvent(event)
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
+    def mousePressEvent(self, event: Optional[QMouseEvent]) -> None:
+        if event is not None and event.button() == Qt.MouseButton.LeftButton:
             self._pressed = True
             self.update()
         super().mousePressEvent(event)
 
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+    def mouseReleaseEvent(self, event: Optional[QMouseEvent]) -> None:
         self._pressed = False
         self.update()
         super().mouseReleaseEvent(event)
 
-    def paintEvent(self, event: QPaintEvent) -> None:
+    def paintEvent(self, event: Optional[QPaintEvent]) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
@@ -56,7 +56,6 @@ class WindowButton(QPushButton):
         cx = w / 2.0
         cy = h / 2.0
 
-        # Hover background & glow
         if self._hovered:
             if self.kind == "close":
                 bg_color = QColor(185, 75, 75) if self._pressed else QColor(185, 75, 75, 190)
@@ -73,7 +72,6 @@ class WindowButton(QPushButton):
         else:
             glyph_color = QColor("#7d8fa6")
 
-        # Crisp vector glyphs
         pen = QPen(glyph_color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
 
@@ -117,28 +115,30 @@ class DraggableHeader(QFrame):
         super().__init__(parent)
         self._drag_pos: Optional[QPoint] = None
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
+    def mousePressEvent(self, event: Optional[QMouseEvent]) -> None:
+        if event is not None and event.button() == Qt.MouseButton.LeftButton:
             win = self.window()
-            # If native Wayland system move is available, trigger it
-            wh = win.windowHandle()
-            if wh and hasattr(wh, "startSystemMove") and wh.startSystemMove():
+            if win is not None:
+                wh = win.windowHandle()
+                if wh and hasattr(wh, "startSystemMove") and wh.startSystemMove():
+                    event.accept()
+                    return
+
+                self._drag_pos = event.globalPosition().toPoint() - win.frameGeometry().topLeft()
                 event.accept()
                 return
-
-            self._drag_pos = event.globalPosition().toPoint() - win.frameGeometry().topLeft()
-            event.accept()
-            return
         super().mousePressEvent(event)
 
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._drag_pos is not None and event.buttons() == Qt.MouseButton.LeftButton:
-            self.window().move(event.globalPosition().toPoint() - self._drag_pos)
-            event.accept()
-            return
+    def mouseMoveEvent(self, event: Optional[QMouseEvent]) -> None:
+        if event is not None and self._drag_pos is not None and event.buttons() == Qt.MouseButton.LeftButton:
+            win = self.window()
+            if win is not None:
+                win.move(event.globalPosition().toPoint() - self._drag_pos)
+                event.accept()
+                return
         super().mouseMoveEvent(event)
 
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+    def mouseReleaseEvent(self, event: Optional[QMouseEvent]) -> None:
         self._drag_pos = None
         super().mouseReleaseEvent(event)
 
@@ -169,22 +169,34 @@ class FramelessResizeHandler(QObject):
         self.drag_start_geo: Optional[QRect] = None
         self._cursor_overridden = False
         self._cursor_shape: Optional[Qt.CursorShape] = None
+        self._filter_installed = False
 
+        self._install_filter()
+        self.window.destroyed.connect(self.cleanup)
+        self._enable_mouse_tracking(self.window)
+
+    def _install_filter(self) -> None:
+        if self._filter_installed:
+            return
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
-        self.window.destroyed.connect(self.cleanup)
+            self._filter_installed = True
 
-        self._enable_mouse_tracking(self.window)
-
-    def cleanup(self) -> None:
-        self._restore_cursor()
+    def _remove_filter(self) -> None:
+        if not self._filter_installed:
+            return
         app = QApplication.instance()
         if app is not None:
             try:
                 app.removeEventFilter(self)
             except Exception:
                 pass
+        self._filter_installed = False
+
+    def cleanup(self) -> None:
+        self._restore_cursor()
+        self._remove_filter()
 
     def attach_to_widget(self, widget: QWidget) -> None:
         """Enables mouse tracking on a widget and its children to ensure mouse move events are delivered."""
@@ -212,11 +224,9 @@ class FramelessResizeHandler(QObject):
             self._cursor_shape = None
 
     def _get_edge(self, watched: QWidget, pos_in_watched: QPoint) -> str:
-        # Avoid intercepting window buttons (Close, Minimize)
         if isinstance(watched, WindowButton):
             return ""
 
-        # Map position accurately to window coordinates
         local_pos = watched.mapTo(self.window, pos_in_watched)
         x = local_pos.x()
         y = local_pos.y()
@@ -226,7 +236,6 @@ class FramelessResizeHandler(QObject):
         if x < 0 or x > w or y < 0 or y > h:
             return ""
 
-        # Check corners first
         if x <= self.CORNER_SIZE and y <= self.CORNER_SIZE:
             return "TL"
         if x >= w - self.CORNER_SIZE and y <= self.CORNER_SIZE:
@@ -236,7 +245,6 @@ class FramelessResizeHandler(QObject):
         if x >= w - self.CORNER_SIZE and y >= h - self.CORNER_SIZE:
             return "BR"
 
-        # Check edges
         if y <= self.BORDER_WIDTH:
             return "T"
         if y >= h - self.BORDER_WIDTH:
@@ -248,16 +256,28 @@ class FramelessResizeHandler(QObject):
 
         return ""
 
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+    def eventFilter(self, watched: Optional[QObject], event: Optional[QEvent]) -> bool:
+        if watched is None or event is None:
+            return super().eventFilter(watched, event)
+
         if not isinstance(watched, QWidget) or watched.window() != self.window:
             return super().eventFilter(watched, event)
 
-        # Dynamically ensure mouse tracking is active as widgets receive hover
-        if event.type() in (QEvent.Type.Enter, QEvent.Type.ChildAdded, QEvent.Type.Show):
+        etype = event.type()
+        if watched == self.window and etype in (QEvent.Type.Hide, QEvent.Type.Close, QEvent.Type.WindowDeactivate):
+            self.resizing_edge = None
+            self.drag_start_pos = None
+            self.drag_start_geo = None
+            self._restore_cursor()
+            if etype in (QEvent.Type.Hide, QEvent.Type.Close):
+                self._remove_filter()
+            return super().eventFilter(watched, event)
+
+        if etype in (QEvent.Type.Enter, QEvent.Type.ChildAdded, QEvent.Type.Show):
             if not watched.hasMouseTracking():
                 watched.setMouseTracking(True)
 
-        if event.type() == QEvent.Type.MouseMove and isinstance(event, QMouseEvent):
+        if etype == QEvent.Type.MouseMove and isinstance(event, QMouseEvent):
             if self.resizing_edge is not None and self.drag_start_pos is not None and self.drag_start_geo is not None:
                 delta = event.globalPosition().toPoint() - self.drag_start_pos
                 geo = self.drag_start_geo
@@ -298,7 +318,7 @@ class FramelessResizeHandler(QObject):
             elif self._cursor_overridden:
                 self._restore_cursor()
 
-        elif event.type() == QEvent.Type.MouseButtonPress and isinstance(event, QMouseEvent):
+        elif etype == QEvent.Type.MouseButtonPress and isinstance(event, QMouseEvent):
             if event.button() == Qt.MouseButton.LeftButton:
                 edge = self._get_edge(watched, event.position().toPoint())
                 if edge:
@@ -320,7 +340,7 @@ class FramelessResizeHandler(QObject):
                     event.accept()
                     return True
 
-        elif event.type() == QEvent.Type.MouseButtonRelease and isinstance(event, QMouseEvent):
+        elif etype == QEvent.Type.MouseButtonRelease and isinstance(event, QMouseEvent):
             if self.resizing_edge is not None:
                 self.resizing_edge = None
                 self.drag_start_pos = None
@@ -329,7 +349,7 @@ class FramelessResizeHandler(QObject):
                 event.accept()
                 return True
 
-        elif event.type() == QEvent.Type.Leave and watched == self.window:
+        elif etype == QEvent.Type.Leave and watched == self.window:
             if self.resizing_edge is None and self._cursor_overridden:
                 self._restore_cursor()
 
@@ -352,7 +372,6 @@ class FramelessDialogBase(QDialog):
         self.content_layout.setContentsMargins(16, 12, 16, 16)
         self.content_layout.setSpacing(12)
 
-        # Header bar
         self.dialog_header = DraggableHeader()
         self.dialog_header.setStyleSheet("""
             QFrame {
@@ -379,28 +398,37 @@ class FramelessDialogBase(QDialog):
         self.content_layout.addWidget(self.dialog_header)
 
     def center_over_parent(self) -> None:
-        """Positions the dialog centered over its parent window, or screen center if no parent."""
+        """Positions the dialog centered over its parent window, clamped to screen bounds."""
         parent = self.parentWidget()
         dlg_width = self.width() if self.width() > 0 else self.sizeHint().width()
         dlg_height = self.height() if self.height() > 0 else self.sizeHint().height()
 
+        screen = (parent.screen() if parent else None) or self.screen()
         if parent:
             parent_geo = parent.frameGeometry()
-            # Align dialog center with the parent window's center
             x = parent_geo.x() + (parent_geo.width() - dlg_width) // 2
             y = parent_geo.y() + (parent_geo.height() - dlg_height) // 2
-            self.move(x, y)
+        elif screen:
+            screen_geo = screen.availableGeometry()
+            x = screen_geo.left() + (screen_geo.width() - dlg_width) // 2
+            y = screen_geo.top() + (screen_geo.height() - dlg_height) // 2
         else:
-            screen = self.screen()
-            if screen:
-                screen_geo = screen.availableGeometry()
-                x = screen_geo.left() + (screen_geo.width() - dlg_width) // 2
-                y = screen_geo.top() + (screen_geo.height() - dlg_height) // 2
-                self.move(x, y)
+            return
+
+        if screen:
+            avail = screen.availableGeometry()
+            x = max(avail.left(), min(x, avail.right() - dlg_width + 1))
+            y = max(avail.top(), min(y, avail.bottom() - dlg_height + 1))
+
+        self.move(x, y)
 
     def showEvent(self, event) -> None:
+        self.resize_handler._install_filter()
         super().showEvent(event)
         self.center_over_parent()
-        # Schedule an immediate adjustment on the event loop in case compositor/window manager
-        # sets initial geometry during window map
         QTimer.singleShot(0, self.center_over_parent)
+
+    def hideEvent(self, event) -> None:
+        self.resize_handler._restore_cursor()
+        self.resize_handler._remove_filter()
+        super().hideEvent(event)

@@ -9,16 +9,15 @@ from config import ConfigManager
 from ui.themes import (
     DEFAULT_THEME,
     THEMES,
-    Theme,
-    get_theme,
-    get_theme_choices,
     build_card_stylesheet,
-    build_header_btn_stylesheet,
     build_default_btn_active_stylesheet,
     build_delete_btn_stylesheet,
+    build_header_btn_stylesheet,
     build_micro_btn_stylesheet,
     build_micro_delete_btn_stylesheet,
     build_primary_btn_stylesheet,
+    get_theme,
+    get_theme_choices,
 )
 
 
@@ -37,7 +36,6 @@ class TestThemes(unittest.TestCase):
         self.assertEqual(theme.key, "modern_minimalist")
         self.assertEqual(theme.name, "Modern Minimalist")
         self.assertTrue(theme.description)
-        # Ensure hex colors start with # or rgba
         for field_name in (
             "bg_base", "bg_surface", "bg_card", "bg_header",
             "card_hover", "border_subtle", "border_focus",

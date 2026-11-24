@@ -9,19 +9,21 @@ import argparse
 import sys
 from pathlib import Path
 
-# Add project root to sys.path
+# Add project root to sys.path before local imports
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QIcon, QPalette, QColor
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QTimer  # noqa: E402
+from PyQt6.QtGui import QColor, QIcon, QPalette  # noqa: E402
+from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from config import ConfigManager
-from launcher import AppLauncher
-from ui.main_window import MainWindow
-from ui.themes import get_theme
+from config import ConfigManager  # noqa: E402
+from launcher import AppLauncher  # noqa: E402
+from logging_utils import setup_logging  # noqa: E402
+from ui.main_window import MainWindow  # noqa: E402
+from ui.themes import get_theme  # noqa: E402
+from updater import APP_VERSION  # noqa: E402
 
 
 def apply_dark_theme(app: QApplication) -> None:
@@ -45,32 +47,45 @@ def apply_dark_theme(app: QApplication) -> None:
 
 
 def main() -> None:
+    logger = setup_logging()
+
     parser = argparse.ArgumentParser(description="AutoLaunch Desktop Application")
     parser.add_argument("--autostart", action="store_true", help="Started by desktop autostart")
     parser.add_argument("--config", action="store_true", help="Open in configuration mode without countdown")
     parser.add_argument("--headless", action="store_true", help="Launch active profile without showing GUI")
+    parser.add_argument("--profile", type=str, default="", help="Profile name to activate for this session")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
     args = parser.parse_args()
 
     config_manager = ConfigManager()
-    if config_manager.default_profile in config_manager.profiles:
+    if args.profile:
+        if args.profile not in config_manager.profiles:
+            print(f"Error: Profile '{args.profile}' not found.", file=sys.stderr)
+            logger.error("Requested profile '%s' not found", args.profile)
+            sys.exit(1)
+        config_manager.active_profile = args.profile
+    elif config_manager.default_profile in config_manager.profiles:
         config_manager.active_profile = config_manager.default_profile
 
     if args.headless:
         profile = config_manager.get_current_profile()
         enabled = [a for a in profile.apps if a.enabled]
-        AppLauncher.launch_many(enabled, global_launch_minimized=config_manager.launch_minimized)
-        sys.exit(0)
-
-    # Disable countdown if --config flag is explicitly passed
-    if args.config:
-        config_manager.enable_countdown = False
+        launched = AppLauncher.launch_many(
+            enabled, global_launch_minimized=config_manager.launch_minimized
+        )
+        logger.info(
+            "Headless launch for profile '%s': %d/%d apps started",
+            profile.name,
+            launched,
+            len(enabled),
+        )
+        sys.exit(0 if launched == len(enabled) else 1)
 
     app = QApplication(sys.argv)
     app.setApplicationName("AutoLaunch")
     app.setApplicationDisplayName("AutoLaunch")
     app.setDesktopFileName("autolaunch")
 
-    # App icon
     app_icon = None
     for icon_name in ("autolaunch.png", "autolaunch.svg"):
         icon_path = SCRIPT_DIR / "assets" / icon_name
@@ -87,13 +102,22 @@ def main() -> None:
     theme = get_theme(config_manager.theme)
     app.setStyleSheet(theme.build_stylesheet())
 
-    window = MainWindow(config_manager, autostart_mode=args.autostart)
+    window = MainWindow(
+        config_manager,
+        autostart_mode=args.autostart,
+        disable_countdown=args.config,
+    )
     if app_icon is not None and not app_icon.isNull():
         window.setWindowIcon(app_icon)
     window.show()
     window.raise_()
     window.activateWindow()
-    QTimer.singleShot(150, lambda: (window.raise_(), window.activateWindow()))
+
+    def _refocus() -> None:
+        window.raise_()
+        window.activateWindow()
+
+    QTimer.singleShot(150, _refocus)
 
     sys.exit(app.exec())
 

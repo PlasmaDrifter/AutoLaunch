@@ -11,7 +11,6 @@ Complies with zero-hardcoded-paths and zero-emoji guidelines.
 """
 
 import json
-import logging
 import os
 import re
 import shutil
@@ -23,11 +22,15 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
-APP_VERSION = "0.4.2"
+from logging_utils import get_logger
+
+APP_VERSION = "0.4.3"
 GITHUB_REPO = "PlasmaDrifter/AutoLaunch"
 BASE_DIR = str(Path(__file__).resolve().parent)
+
+_LOGGER = get_logger("autolaunch.updater")
 
 UPDATE_CACHE: Dict[str, Any] = {
     "last_checked": 0,
@@ -61,11 +64,12 @@ def is_newer_version(latest: str, current: str = APP_VERSION) -> bool:
         return False
 
 
-def check_github_update(force: bool = False) -> Dict[str, Any]:
-    """Queries GitHub Releases API for the latest version with in-memory caching."""
+def get_cached_update_status() -> Optional[Dict[str, Any]]:
+    """Returns cached update result without making any network requests, or None if uncached."""
     now = time.time()
     with UPDATE_CACHE["lock"]:
-        if not force and (now - UPDATE_CACHE["last_checked"] < 3600) and UPDATE_CACHE["last_checked"] > 0:
+        last_checked = UPDATE_CACHE["last_checked"]
+        if last_checked > 0 and (now - last_checked < 3600):
             return {
                 "ok": True,
                 "has_update": UPDATE_CACHE["has_update"],
@@ -73,7 +77,17 @@ def check_github_update(force: bool = False) -> Dict[str, Any]:
                 "release_url": UPDATE_CACHE["release_url"],
                 "current_version": APP_VERSION,
             }
+    return None
 
+
+def check_github_update(force: bool = False) -> Dict[str, Any]:
+    """Queries GitHub Releases API for the latest version with in-memory caching."""
+    if not force:
+        cached = get_cached_update_status()
+        if cached is not None:
+            return cached
+
+    now = time.time()
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
         req = urllib.request.Request(
@@ -103,7 +117,7 @@ def check_github_update(force: bool = False) -> Dict[str, Any]:
                 "current_version": APP_VERSION,
             }
     except Exception as e:
-        logging.debug(f"Update check failed: {e}")
+        _LOGGER.debug("Update check failed: %s", e)
         with UPDATE_CACHE["lock"]:
             UPDATE_CACHE["last_checked"] = now - 3300  # Retry sooner on error
             return {
@@ -122,42 +136,58 @@ def apply_self_update(target_tag: str = "") -> Dict[str, Any]:
 
     # 1. Git-based installation mode
     if is_git:
+        git_available = False
         try:
-            git_check = subprocess.run(["git", "--version"], capture_output=True, text=True)
-            if git_check.returncode == 0:
-                cmd = ["git", "pull", "--ff-only"]
-                res = subprocess.run(cmd, cwd=BASE_DIR, capture_output=True, text=True)
-                if res.returncode == 0:
-                    return {"mode": "git", "message": "Updated via git pull", "tag": target_tag or "latest"}
+            git_check = subprocess.run(
+                ["git", "--version"], capture_output=True, text=True, check=False
+            )
+            git_available = git_check.returncode == 0
+        except OSError as exc:
+            _LOGGER.debug("Git binary unavailable, falling back to archive mode: %s", exc)
 
-                fetch_res = subprocess.run(
-                    ["git", "fetch", "--prune", "--tags", "origin"],
-                    cwd=BASE_DIR,
-                    capture_output=True,
-                    text=True,
-                )
-                if fetch_res.returncode == 0:
-                    branch_res = subprocess.run(
-                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                        cwd=BASE_DIR,
-                        capture_output=True,
-                        text=True,
-                    )
-                    branch = branch_res.stdout.strip() or "master"
-                    reset_res = subprocess.run(
-                        ["git", "reset", "--hard", f"origin/{branch}"],
-                        cwd=BASE_DIR,
-                        capture_output=True,
-                        text=True,
-                    )
-                    if reset_res.returncode == 0:
-                        return {
-                            "mode": "git-reset",
-                            "message": f"Updated via git reset to origin/{branch}",
-                            "tag": target_tag or "latest",
-                        }
-        except Exception as e:
-            logging.debug(f"Git update failed, falling back to archive mode: {e}")
+        if git_available:
+            cmd = ["git", "pull", "--ff-only"]
+            res = subprocess.run(
+                cmd, cwd=BASE_DIR, capture_output=True, text=True, check=False
+            )
+            if res.returncode == 0:
+                return {"mode": "git", "message": "Updated via git pull", "tag": target_tag or "latest"}
+
+            fetch_res = subprocess.run(
+                ["git", "fetch", "--prune", "--tags", "origin"],
+                cwd=BASE_DIR,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if fetch_res.returncode != 0:
+                err_msg = fetch_res.stderr.strip() or res.stderr.strip() or "git fetch failed"
+                raise RuntimeError(f"Git update failed: {err_msg}")
+
+            branch_res = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=BASE_DIR,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            branch = branch_res.stdout.strip()
+            reset_target = "origin/master" if (not branch or branch == "HEAD") else f"origin/{branch}"
+            reset_res = subprocess.run(
+                ["git", "reset", "--hard", reset_target],
+                cwd=BASE_DIR,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if reset_res.returncode == 0:
+                return {
+                    "mode": "git-reset",
+                    "message": f"Updated via git reset to {reset_target}",
+                    "tag": target_tag or "latest",
+                }
+            err_msg = reset_res.stderr.strip() or "git reset failed"
+            raise RuntimeError(f"Git update failed: {err_msg}")
 
     # 2. Archive-based installation mode (No git required)
     if not target_tag:
@@ -181,7 +211,8 @@ def apply_self_update(target_tag: str = "") -> Dict[str, Any]:
         try:
             with urllib.request.urlopen(req, timeout=30) as resp, open(archive_file, "wb") as f_out:
                 shutil.copyfileobj(resp, f_out)
-        except Exception:
+        except Exception as exc:
+            _LOGGER.debug("Tag archive download failed (%s), trying master tarball", exc)
             fallback_url = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/master.tar.gz"
             req_fb = urllib.request.Request(
                 fallback_url,
@@ -219,10 +250,32 @@ def apply_self_update(target_tag: str = "") -> Dict[str, Any]:
 
 
 def restart_application() -> None:
-    """Restarts the AutoLaunch application in-place with the current interpreter."""
-    def _do_restart():
-        time.sleep(0.5)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+    """Restarts the AutoLaunch application cleanly on the main thread."""
+    clean_args = [arg for arg in sys.argv[1:] if arg != "--autostart"]
+    cmd = [sys.executable, sys.argv[0], *clean_args]
 
-    t = threading.Thread(target=_do_restart, daemon=True)
-    t.start()
+    try:
+        from PyQt6.QtCore import QTimer
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            def _spawn_and_quit() -> None:
+                subprocess.Popen(
+                    cmd,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+                app.quit()
+
+            QTimer.singleShot(250, _spawn_and_quit)
+            return
+    except Exception as exc:
+        _LOGGER.debug("Qt restart scheduling fallback: %s", exc)
+
+    subprocess.Popen(
+        cmd,
+        start_new_session=True,
+        close_fds=True,
+    )
+    sys.exit(0)

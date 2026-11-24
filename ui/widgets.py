@@ -1,29 +1,31 @@
 """Custom modern UI widgets for AutoLaunch.
 
-Provides an animated toggle switch and custom badge pills.
+Provides an animated toggle switch, stepper spinbox, elided label, help badge, and flow layout.
 Complies with zero-emoji guidelines.
 """
 
 from typing import Optional
 
 from PyQt6.QtCore import (
-    QEasingCurve, QPropertyAnimation, QPoint, QRect, QRectF, QSize, Qt, pyqtProperty, pyqtSignal
+    QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, pyqtSignal
 )
-from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPaintEvent
+from PyQt6.QtCore import pyqtProperty  # type: ignore[attr-defined]
+from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPaintEvent, QWheelEvent
 from PyQt6.QtWidgets import (
     QAbstractButton, QHBoxLayout, QLabel, QLayout, QLayoutItem, QPushButton,
-    QToolTip, QWidget, QSizePolicy
+    QSizePolicy, QToolTip, QWidget
 )
 
 
 class HelpBadge(QPushButton):
-    """Circular '?' badge providing helpful configuration info via tooltip and click."""
+    """Circular '?' badge providing helpful configuration info via hover tooltip and click."""
 
     def __init__(self, info_text: str, parent: Optional[QWidget] = None, max_pixel_width: int = 290):
         super().__init__("?", parent)
         self._raw_text = info_text
         self._blocked_text = self._wrap_by_pixels(info_text.strip(), max_pixel_width)
         self.setFixedSize(18, 18)
+        self.setCursor(Qt.CursorShape.WhatsThisCursor)
         self.setStyleSheet("""
             QPushButton {
                 background-color: #202024;
@@ -42,7 +44,11 @@ class HelpBadge(QPushButton):
         """)
         self.clicked.connect(self._show_info)
 
-    def leaveEvent(self, event) -> None:
+    def enterEvent(self, event: Optional[QEvent]) -> None:  # type: ignore[override]
+        self._show_info()
+        super().enterEvent(event)  # type: ignore[arg-type]
+
+    def leaveEvent(self, event: Optional[QEvent]) -> None:
         QToolTip.hideText()
         super().leaveEvent(event)
 
@@ -54,7 +60,7 @@ class HelpBadge(QPushButton):
         lines = []
         for paragraph in text.split("\n"):
             words = paragraph.split()
-            curr_line = []
+            curr_line: list[str] = []
             for word in words:
                 trial = " ".join(curr_line + [word])
                 if fm.horizontalAdvance(trial) > max_px and curr_line:
@@ -67,8 +73,6 @@ class HelpBadge(QPushButton):
         return "\n".join(lines)
 
     def _show_info(self) -> None:
-        # Show tooltip without an early auto-dismiss timeout (-1 or large duration).
-        # It stays visible until leaveEvent calls QToolTip.hideText() when the mouse moves away.
         QToolTip.showText(self.mapToGlobal(self.rect().bottomLeft()), self._blocked_text, self, self.rect(), 300000)
 
 
@@ -81,7 +85,8 @@ class ElidedLabel(QLabel):
         self.setToolTip(text)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
-    def setText(self, text: str) -> None:
+    def setText(self, a0: Optional[str]) -> None:
+        text = a0 or ""
         self._full_text = text
         self.setToolTip(text)
         super().setText(text)
@@ -90,13 +95,14 @@ class ElidedLabel(QLabel):
     def minimumSizeHint(self) -> QSize:
         return QSize(20, self.fontMetrics().height())
 
-    def paintEvent(self, event: QPaintEvent) -> None:
+    def paintEvent(self, a0: Optional[QPaintEvent]) -> None:
         painter = QPainter(self)
         painter.setPen(self.palette().color(self.foregroundRole()))
         painter.setFont(self.font())
         metrics = self.fontMetrics()
-        elided = metrics.elidedText(self._full_text, Qt.TextElideMode.ElideRight, max(0, self.width()))
-        painter.drawText(self.rect(), self.alignment() | Qt.AlignmentFlag.AlignVCenter, elided)
+        rect = self.contentsRect()
+        elided = metrics.elidedText(self._full_text, Qt.TextElideMode.ElideRight, max(0, rect.width()))
+        painter.drawText(rect, self.alignment() | Qt.AlignmentFlag.AlignVCenter, elided)
 
 
 class ToggleSwitch(QAbstractButton):
@@ -104,11 +110,12 @@ class ToggleSwitch(QAbstractButton):
 
     def __init__(self, parent: Optional[QWidget] = None, width: int = 38, height: int = 20):
         super().__init__(parent)
+        self._width = width
+        self._height = height
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(width, height)
 
-        # 0.0 = unchecked (left), 1.0 = checked (right)
         self._thumb_position = 1.0 if self.isChecked() else 0.0
         self._active_color: QColor = QColor("#19945C")
         self._inactive_color: QColor = QColor("#2f2f37")
@@ -129,7 +136,7 @@ class ToggleSwitch(QAbstractButton):
     def thumb_position(self) -> float:
         return self._thumb_position
 
-    @thumb_position.setter
+    @thumb_position.setter  # type: ignore[no-redef]
     def thumb_position(self, pos: float) -> None:
         self._thumb_position = pos
         self.update()
@@ -146,11 +153,13 @@ class ToggleSwitch(QAbstractButton):
         self._animation.start()
 
     def sizeHint(self) -> QSize:
-        return QSize(44, 24)
+        return QSize(self._width, self._height)
 
-    def paintEvent(self, event: QPaintEvent) -> None:
+    def paintEvent(self, a0: Optional[QPaintEvent]) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.5)
 
         w = self.width()
         h = self.height()
@@ -162,21 +171,17 @@ class ToggleSwitch(QAbstractButton):
         b = int(self._inactive_color.blue() + (self._active_color.blue() - self._inactive_color.blue()) * t)
         track_color = QColor(r, g, b)
 
-        # Draw track
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(track_color))
         p.drawRoundedRect(QRectF(0, 0, w, h), radius, radius)
 
-        # Thumb
         thumb_diameter = h - 6
         thumb_x = 3 + self._thumb_position * (w - thumb_diameter - 6)
         thumb_y = 3
 
-        # Thumb shadow (soft ring)
         p.setBrush(QBrush(QColor(0, 0, 0, 40)))
         p.drawEllipse(QRectF(thumb_x - 0.5, thumb_y + 0.5, thumb_diameter + 1, thumb_diameter + 1))
 
-        # Thumb body (soft off-white)
         p.setBrush(QBrush(QColor(226, 232, 240)))
         p.drawEllipse(QRectF(thumb_x, thumb_y, thumb_diameter, thumb_diameter))
 
@@ -223,8 +228,8 @@ STEPPER_BTN_STYLE = """
     }
     QPushButton:hover {
         background-color: #28282e;
-        border-color: #475569;
-        color: #d4d4d8;
+        border-color: #64748b;
+        color: #ffffff;
     }
     QPushButton:pressed {
         background-color: #18181b;
@@ -238,9 +243,9 @@ STEPPER_BTN_STYLE = """
 
 STEPPER_BTN_COMPACT_STYLE = """
     QPushButton {
-        background-color: #1e293b;
-        color: #f1f5f9;
-        border: 1px solid #334155;
+        background-color: #202024;
+        color: #d4d4d8;
+        border: 1px solid #2f2f37;
         border-radius: 4px;
         font-size: 13px;
         font-weight: bold;
@@ -251,17 +256,17 @@ STEPPER_BTN_COMPACT_STYLE = """
         max-height: 24px;
     }
     QPushButton:hover {
-        background-color: #334155;
-        border-color: #4a6d8c;
-        color: #6297bf;
+        background-color: #28282e;
+        border-color: #64748b;
+        color: #ffffff;
     }
     QPushButton:pressed {
-        background-color: #0f172a;
+        background-color: #18181b;
     }
     QPushButton:disabled {
-        background-color: #111827;
-        color: #475569;
-        border-color: #1f2937;
+        background-color: #18181b;
+        color: #71717a;
+        border-color: #2f2f37;
     }
 """
 
@@ -281,9 +286,9 @@ STEPPER_LABEL_STYLE_ENABLED = """
 
 STEPPER_LABEL_STYLE_DISABLED = """
     QLabel {
-        background-color: #0f172a;
-        color: #475569;
-        border: 1px solid #1e293b;
+        background-color: #141417;
+        color: #71717a;
+        border: 1px solid #26262c;
         border-radius: 6px;
         padding: 5px 14px;
         font-weight: 600;
@@ -295,9 +300,9 @@ STEPPER_LABEL_STYLE_DISABLED = """
 
 STEPPER_LABEL_COMPACT_ENABLED = """
     QLabel {
-        background-color: #111827;
-        color: #f8fafc;
-        border: 1px solid #28354f;
+        background-color: #18181b;
+        color: #d4d4d8;
+        border: 1px solid #2f2f37;
         border-radius: 4px;
         padding: 2px 6px;
         font-weight: 600;
@@ -309,9 +314,9 @@ STEPPER_LABEL_COMPACT_ENABLED = """
 
 STEPPER_LABEL_COMPACT_DISABLED = """
     QLabel {
-        background-color: #0f172a;
-        color: #475569;
-        border: 1px solid #1e293b;
+        background-color: #141417;
+        color: #71717a;
+        border: 1px solid #26262c;
         border-radius: 4px;
         padding: 2px 6px;
         font-weight: 600;
@@ -323,7 +328,7 @@ STEPPER_LABEL_COMPACT_DISABLED = """
 
 
 class StepperSpinBox(QWidget):
-    """SpinBox with prominent +/- stepper buttons and read-only value display."""
+    """SpinBox with prominent +/- auto-repeat stepper buttons and mouse wheel support."""
 
     valueChanged = pyqtSignal(int)
 
@@ -354,6 +359,9 @@ class StepperSpinBox(QWidget):
 
         self.minus_btn = QPushButton("−")
         self.minus_btn.setStyleSheet(btn_style)
+        self.minus_btn.setAutoRepeat(True)
+        self.minus_btn.setAutoRepeatDelay(350)
+        self.minus_btn.setAutoRepeatInterval(55)
         self.minus_btn.clicked.connect(self._decrement)
 
         self.display_label = QLabel()
@@ -362,6 +370,9 @@ class StepperSpinBox(QWidget):
 
         self.plus_btn = QPushButton("+")
         self.plus_btn.setStyleSheet(btn_style)
+        self.plus_btn.setAutoRepeat(True)
+        self.plus_btn.setAutoRepeatDelay(350)
+        self.plus_btn.setAutoRepeatInterval(55)
         self.plus_btn.clicked.connect(self._increment)
 
         layout.addWidget(self.minus_btn)
@@ -370,13 +381,34 @@ class StepperSpinBox(QWidget):
         if not compact:
             layout.addStretch()
 
+        self.setToolTip("Click or hold +/- (or scroll wheel; hold Shift for larger steps)")
         self._update_display()
 
+    def _step_amount(self) -> int:
+        from PyQt6.QtWidgets import QApplication
+        mods = QApplication.keyboardModifiers()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            return self._step * 5
+        return self._step
+
     def _decrement(self) -> None:
-        self.setValue(self._value - self._step)
+        self.setValue(self._value - self._step_amount())
 
     def _increment(self) -> None:
-        self.setValue(self._value + self._step)
+        self.setValue(self._value + self._step_amount())
+
+    def wheelEvent(self, a0: Optional[QWheelEvent]) -> None:
+        if a0 is not None and self.isEnabled():
+            delta = a0.angleDelta().y()
+            if delta > 0:
+                self._increment()
+                a0.accept()
+                return
+            if delta < 0:
+                self._decrement()
+                a0.accept()
+                return
+        super().wheelEvent(a0)
 
     def _update_display(self) -> None:
         self.display_label.setText(f"{self._value}{self._suffix}")
@@ -438,8 +470,9 @@ class FlowLayout(QLayout):
         self.setContentsMargins(margin, margin, margin, margin)
         self.setSpacing(spacing)
 
-    def addItem(self, item: QLayoutItem) -> None:
-        self.item_list.append(item)
+    def addItem(self, a0: Optional[QLayoutItem]) -> None:
+        if a0 is not None:
+            self.item_list.append(a0)
 
     def count(self) -> int:
         return len(self.item_list)
@@ -460,12 +493,12 @@ class FlowLayout(QLayout):
     def hasHeightForWidth(self) -> bool:
         return True
 
-    def heightForWidth(self, width: int) -> int:
-        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+    def heightForWidth(self, a0: int) -> int:
+        return self._do_layout(QRect(0, 0, a0, 0), test_only=True)
 
-    def setGeometry(self, rect: QRect) -> None:
-        super().setGeometry(rect)
-        self._do_layout(rect, test_only=False)
+    def setGeometry(self, a0: QRect) -> None:
+        super().setGeometry(a0)
+        self._do_layout(a0, test_only=False)
 
     def sizeHint(self) -> QSize:
         return self.minimumSize()
@@ -507,5 +540,3 @@ class FlowLayout(QLayout):
             line_height = max(line_height, item.sizeHint().height())
 
         return y + line_height - rect.y() + margins.bottom()
-
-

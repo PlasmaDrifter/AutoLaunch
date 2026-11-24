@@ -15,16 +15,17 @@ AutoLaunch is a modern, native PyQt6 desktop application designed for Linux desk
 ## Key Features
 
 - **Desktop Boot Autostart**: Seamlessly integrates with standard FreeDesktop autostart specifications (`~/.config/autostart/autolaunch.desktop`) using dynamic runtime environment paths without hardcoded user directories.
-- **Application Discovery**: Automatically scans and parses installed system and user `.desktop` entries across standard XDG locations and Flatpak installations with real-time search filtering.
+- **Application Discovery**: Automatically scans and parses installed system and user `.desktop` entries asynchronously across standard XDG locations and Flatpak installations with real-time search filtering, manual refresh, and optional custom command overrides.
 - **Native Window & Icon Fidelity**: Uses `gtk-launch` and `gio launch` for desktop applications to ensure Wayland compositors (such as KWin) correctly associate running application windows with their `.desktop` specifications, preserving customized taskbar and titlebar icons (e.g. separate browser profiles or web app wrappers).
 - **Profiles**: Full profile support (Default, Work, Gaming, etc.) allowing creation, renaming, switching, and deletion of custom application sets.
+- **Per-App Testing & Validation**: Launch any single configured application immediately from its card (`Run`) and detect missing executables or `.desktop` entries before login.
 - **Countdown Timer**: Automatically launches active profile applications after a configurable countdown (default 5-7 seconds) unless paused or cancelled. If cancelled, AutoLaunch remains open for manual inspection.
-- **Precision Stepper Controls**: Convenient plus and minus stepper controls for startup delays and countdown durations without requiring manual numeric keyboard entry.
+- **Precision Stepper Controls**: Auto-repeating plus and minus stepper controls (with Shift/mouse-wheel stepping) for startup delays and countdown durations without requiring manual numeric keyboard entry.
 - **Per-App Startup Delays**: Individual applications can have staggered delays (0 to 300 seconds) to prevent disk and network congestion during session initialization.
-- **Window Minimization**: Support for launching applications minimized, both per application and as a global policy, leveraging asynchronous compositor controls (`kdotool windowminimize`) under KDE Plasma Wayland.
+- **Window Minimization & Geometry Enforcement**: Support for launching applications minimized, both per application and as a global policy, plus startup geometry enforcement from `kwinrulesrc` via asynchronous compositor controls (`kdotool`) under KDE Plasma Wayland.
 - **Activity Preservation**: Multi-activity support ensuring the desktop environment maintains the user's starting activity even when applications assigned to other activities are spawned.
-- **Modern Dark Interface**: Clean obsidian dark theme with rounded cards, custom vector glyphs, animated toggle switches, status badges, and zero emojis.
-- **Clean Self-Termination**: Closes immediately after launching all selected applications in detached background sessions.
+- **Modern Dark Interface**: Clean Modern Minimalist dark theme with rounded cards, custom vector glyphs, animated toggle switches, status badges, and zero emojis.
+- **Clean Self-Termination & Logging**: Closes immediately after launching all selected applications in detached `systemd-run` sessions (`--collect`) and writes rotating diagnostics to `~/.local/state/autolaunch/autolaunch.log`.
 
 ---
 
@@ -90,9 +91,20 @@ autolaunch --config
 autolaunch --headless
 ```
 
+### Launch a Specific Profile
+```bash
+autolaunch --profile Work
+autolaunch --headless --profile Work
+```
+
 ### Desktop Autostart Mode
 ```bash
 autolaunch --autostart
+```
+
+### Print Version
+```bash
+autolaunch --version
 ```
 
 ---

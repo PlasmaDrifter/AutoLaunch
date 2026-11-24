@@ -22,7 +22,14 @@ from ui.themes import (
     get_theme,
 )
 from ui.widgets import HelpBadge, StepperSpinBox
-from updater import APP_VERSION, GITHUB_REPO, apply_self_update, check_github_update, restart_application
+from updater import (
+    APP_VERSION,
+    GITHUB_REPO,
+    apply_self_update,
+    check_github_update,
+    get_cached_update_status,
+    restart_application,
+)
 
 
 class SettingsDialog(FramelessDialogBase):
@@ -44,8 +51,8 @@ class SettingsDialog(FramelessDialogBase):
         self._init_ui()
         self._apply_dialog_theme(self.config_manager.theme)
 
-        cached = check_github_update(force=False)
-        if cached.get("ok") and cached.get("has_update"):
+        cached = get_cached_update_status()
+        if cached is not None and cached.get("ok") and cached.get("has_update"):
             self._handle_update_check_result(cached)
 
     def _init_ui(self) -> None:
@@ -107,7 +114,7 @@ class SettingsDialog(FramelessDialogBase):
             self.enable_countdown_check,
             "When enabled, opening AutoLaunch starts a countdown bar. When it reaches 0s, "
             "it launches your apps and exits. If unchecked, the app waits on screen until you "
-            "manually click 'Launch All Apps Now'."
+            "manually click 'Launch Selected'."
         ))
 
         self.countdown_autostart_only_check = QCheckBox("Only activate countdown on desktop login / boot")
@@ -122,6 +129,7 @@ class SettingsDialog(FramelessDialogBase):
 
         self.spacebar_hint_lbl = QLabel("Use the spacebar to pause")
         self.spacebar_hint_lbl.setStyleSheet("color: #71717a; font-size: 11px; margin-left: 28px; margin-top: -4px;")
+        self.spacebar_hint_lbl.setEnabled(self.config_manager.enable_countdown)
         countdown_vbox.addWidget(self.spacebar_hint_lbl)
 
         duration_layout = QHBoxLayout()
@@ -274,7 +282,9 @@ class SettingsDialog(FramelessDialogBase):
         self.update_row.setContentsMargins(0, 0, 0, 0)
         self.update_row.setSpacing(8)
 
-        self.version_status_lbl = QLabel(f"Installed Version: <span style='color: #d4d4d8; font-weight: 600;'>v{APP_VERSION}</span>")
+        self.version_status_lbl = QLabel(
+            f"Installed Version: <span style='color: #d4d4d8; font-weight: 600;'>v{APP_VERSION}</span>"
+        )
         self.version_status_lbl.setStyleSheet("color: #d4d4d8; font-size: 13px; font-weight: 600;")
         self.update_row.addWidget(self.version_status_lbl)
 
@@ -340,8 +350,6 @@ class SettingsDialog(FramelessDialogBase):
         self.save_btn.clicked.connect(self._on_save)
         btn_layout.addWidget(self.save_btn)
         main_layout.addLayout(btn_layout)
-
-        self._apply_dialog_theme("modern_minimalist")
 
     def _apply_dialog_theme(self, theme_key: str = "modern_minimalist") -> None:
         theme = get_theme(theme_key)
@@ -420,7 +428,9 @@ class SettingsDialog(FramelessDialogBase):
             grp.setStyleSheet(grp_style)
 
         if hasattr(self, "spacebar_hint_lbl") and self.spacebar_hint_lbl:
-            self.spacebar_hint_lbl.setStyleSheet(f"color: {theme.text_muted}; font-size: 11px; margin-left: 28px; margin-top: -4px;")
+            self.spacebar_hint_lbl.setStyleSheet(
+                f"color: {theme.text_muted}; font-size: 11px; margin-left: 28px; margin-top: -4px;"
+            )
 
         if hasattr(self, "cancel_btn") and self.cancel_btn:
             self.cancel_btn.setStyleSheet(f"""
@@ -525,7 +535,6 @@ class SettingsDialog(FramelessDialogBase):
         self.config_manager.launch_minimized = self.launch_minimized_check.isChecked()
         self.config_manager.autostart_enabled = self.autostart_check.isChecked()
 
-        # Update system autostart desktop file
         AutostartManager.set_autostart(self.autostart_check.isChecked())
 
         chosen_profile = self.default_profile_combo.currentText()
@@ -540,7 +549,7 @@ class SettingsDialog(FramelessDialogBase):
         self.check_updates_btn.setText("Checking...")
         self.version_status_lbl.setText("Checking GitHub for updates...")
 
-        def _worker():
+        def _worker() -> None:
             res = check_github_update(force=True)
             self._update_check_done_signal.emit(res)
 
@@ -594,7 +603,6 @@ class SettingsDialog(FramelessDialogBase):
             return
 
         if self.config_manager.dismissed_update_version == latest:
-            # Undismiss / Restore
             self.config_manager.dismissed_update_version = None
             self.config_manager.save()
             self.version_status_lbl.setText(
@@ -605,7 +613,6 @@ class SettingsDialog(FramelessDialogBase):
             self.update_now_btn.setText(f"Update to {latest}")
             self.update_now_btn.show()
         else:
-            # Dismiss
             self.config_manager.dismissed_update_version = latest
             self.config_manager.save()
             self.version_status_lbl.setText(
@@ -634,7 +641,7 @@ class SettingsDialog(FramelessDialogBase):
         self.update_now_btn.setText("Updating...")
         self.version_status_lbl.setText("<span style='color: #38bdf8;'>Downloading and installing update...</span>")
 
-        def _worker():
+        def _worker() -> None:
             try:
                 apply_self_update(self._target_update_tag)
                 self._update_apply_done_signal.emit(True, "")

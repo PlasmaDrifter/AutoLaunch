@@ -1,13 +1,6 @@
-"""Theme system for AutoLaunch adapted from Theme Factory.
+"""Theme system for AutoLaunch.
 
-Provides 6 curated visual identities:
-- Ocean Depths (Default): Deep maritime navy with soothing teal highlights
-- Tech Innovation: Cyber dark aesthetic with electric blue and neon cyan
-- Midnight Galaxy: Cosmic purple with mystical lavender and indigo accents
-- Forest Canopy: Grounded organic dark theme with sage and olive accents
-- Modern Minimalist: Clean contemporary grayscale with refined slate tones
-- Sunset Boulevard: Deep twilight dusk with warm amber and coral accents
-
+Provides the curated Modern Minimalist dark theme with refined grayscale and slate tones.
 Complies with zero-emoji guidelines and dynamic path resolution.
 """
 
